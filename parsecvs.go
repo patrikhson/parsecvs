@@ -17,21 +17,21 @@ type Record struct {
 func main() {
 	// Command-line arguments
 	fileName := flag.String("file", "", "Path to the CSV file")
-	filter := flag.String("filter", "", `Filters in the format: "name1,value1 name2,'value with space' 'name 3','value 3'"`)
+	filter := flag.String("filter", "", `Filters in the format: "or(Företag,Kalle;Företag,Olle)" or "Företag,Kalle;Stad,Stockholm"`)
 	selectFields := flag.String("select-fields", "", "Comma-separated list of field names to print (optional, defaults to all fields)")
 	unique := flag.Bool("unique", false, "Ensure output lines are unique")
 	flag.Parse()
 
 	// Check if the required arguments are provided
 	if *fileName == "" {
-		fmt.Println("Usage: go run main.go -file=filename.csv -filter='name1,value1 name2,value2' [-select-fields=field1,field2,...] [-unique]")
+		fmt.Println("Usage: go run main.go -file=filename.csv -filter='or(Företag,Kalle;Företag,Olle)' [-select-fields=field1,field2,...] [-unique]")
 		os.Exit(1)
 	}
 
-	// Parse the filters (empty if not provided)
-	filters := parseFilters(*filter)
+	// Parse the filters
+	andFilters, orFilters := parseFilters(*filter)
 
-	// Open the CSV file
+	// Open and read the CSV file
 	file, err := os.Open(*fileName)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
@@ -39,7 +39,6 @@ func main() {
 	}
 	defer file.Close()
 
-	// Read the CSV file
 	reader := csv.NewReader(file)
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -47,16 +46,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Ensure the file has content
 	if len(records) < 2 {
 		fmt.Println("The CSV file must contain a header and at least one data row.")
 		os.Exit(1)
 	}
 
-	// Parse the header
 	header := records[0]
-
-	// Create a slice of structs to hold the data
 	var data []Record
 	for _, row := range records[1:] {
 		record := Record{Data: make(map[string]string)}
@@ -66,85 +61,107 @@ func main() {
 		data = append(data, record)
 	}
 
-	// Process and filter rows in memory
-	filteredRecords := filterRecords(data, filters)
+	// Process filtering
+	filteredRecords := filterRecords(data, andFilters, orFilters)
 
-	// Determine the fields to print
+	// Determine fields to print
 	var fieldsToPrint []string
 	if *selectFields == "" {
-		// Default to printing all fields if -select-fields is not provided
 		fieldsToPrint = header
 	} else {
 		fieldsToPrint = strings.Split(*selectFields, ",")
 	}
 
-	// Print selected fields from the filtered records
-	printedLines := make(map[string]bool) // To track printed lines if -unique is enabled
-
+	// Print selected fields
+	printedLines := make(map[string]bool)
 	for _, record := range filteredRecords {
 		line := formatSelectedFields(record, fieldsToPrint)
-
 		if *unique {
 			if printedLines[line] {
-				continue // Skip duplicate lines
+				continue
 			}
 			printedLines[line] = true
 		}
-
 		fmt.Println(line)
 	}
 }
 
-// Parses the --filter argument into a map of field-value pairs
-func parseFilters(filter string) map[string]string {
-	filters := make(map[string]string)
+// Parses filters into AND and OR conditions
+func parseFilters(filter string) (map[string]string, map[string][]string) {
+	andFilters := make(map[string]string)
+	orFilters := make(map[string][]string)
+
 	if filter == "" {
-		return filters
+		return andFilters, orFilters
 	}
 
-	// Regular expression to match key-value pairs with optional quotes
-	re := regexp.MustCompile(`([^,]+),(?:"([^"]+)"|'([^']+)'|([^ ]+))`)
-
-	matches := re.FindAllStringSubmatch(filter, -1)
-	if len(matches) == 0 {
-		fmt.Printf("Invalid filter format: %s. Ensure key-value pairs are in the format 'key,value'.\n", filter)
-		os.Exit(1)
+	// Check for OR conditions
+	orRegex := regexp.MustCompile(`or\(([^)]+)\)`)
+	orMatches := orRegex.FindStringSubmatch(filter)
+	if len(orMatches) > 1 {
+		orParts := strings.Split(orMatches[1], ";")
+		for _, part := range orParts {
+			kv := strings.SplitN(part, ",", 2)
+			if len(kv) == 2 {
+				field, value := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+				orFilters[field] = append(orFilters[field], value)
+			}
+		}
+		// Remove the OR condition from the main filter string
+		filter = orRegex.ReplaceAllString(filter, "")
 	}
 
-	// Process matches
-	for _, match := range matches {
-		key := strings.TrimSpace(match[1])
-		value := strings.TrimSpace(match[2] + match[3] + match[4]) // Combine the matched value
-		filters[key] = value
+	// Process AND conditions
+	parts := strings.Split(filter, ";")
+	for _, part := range parts {
+		kv := strings.SplitN(part, ",", 2)
+		if len(kv) == 2 {
+			field, value := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+			andFilters[field] = value
+		}
 	}
 
-	return filters
+	return andFilters, orFilters
 }
 
-// Filters records based on the provided filters map
-func filterRecords(data []Record, filters map[string]string) []Record {
-	// If no filters are provided, return all records
-	if len(filters) == 0 {
-		return data
-	}
-
+// Filters records based on AND and OR conditions
+func filterRecords(data []Record, andFilters map[string]string, orFilters map[string][]string) []Record {
 	var filtered []Record
+
 	for _, record := range data {
-		matches := true
-		for field, value := range filters {
+		match := true
+
+		// Check AND filters
+		for field, value := range andFilters {
 			if record.Data[field] != value {
-				matches = false
+				match = false
 				break
 			}
 		}
-		if matches {
+
+		// Check OR filters (only if the AND conditions matched)
+		if match && len(orFilters) > 0 {
+			orMatch := false
+			for field, values := range orFilters {
+				for _, val := range values {
+					if record.Data[field] == val {
+						orMatch = true
+						break
+					}
+				}
+			}
+			match = orMatch // Ensure at least one OR condition is met
+		}
+
+		if match {
 			filtered = append(filtered, record)
 		}
 	}
+
 	return filtered
 }
 
-// Formats selected fields of a record into a single string
+// Formats selected fields of a record into a string
 func formatSelectedFields(record Record, fields []string) string {
 	var output []string
 	for _, field := range fields {
