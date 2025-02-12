@@ -20,16 +20,14 @@ func main() {
 	filter := flag.String("filter", "", `Filters in the format: "or(Företag,Kalle;Företag,Olle)" or "Företag,Kalle;Stad,Stockholm"`)
 	selectFields := flag.String("select-fields", "", "Comma-separated list of field names to print (optional, defaults to all fields)")
 	unique := flag.Bool("unique", false, "Ensure output lines are unique")
+	listFields := flag.Bool("list-fields", false, "List available fields in the CSV file")
 	flag.Parse()
 
-	// Check if the required arguments are provided
+	// Ensure a file is provided
 	if *fileName == "" {
-		fmt.Println("Usage: go run main.go -file=filename.csv -filter='or(Företag,Kalle;Företag,Olle)' [-select-fields=field1,field2,...] [-unique]")
+		fmt.Println("Usage: go run main.go -file=filename.csv [-list-fields] [-filter='or(Företag,Kalle;Företag,Olle)'] [-select-fields=field1,field2,...] [-unique]")
 		os.Exit(1)
 	}
-
-	// Parse the filters
-	andFilters, orFilters := parseFilters(*filter)
 
 	// Open and read the CSV file
 	file, err := os.Open(*fileName)
@@ -46,12 +44,46 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ensure the file has content
 	if len(records) < 2 {
 		fmt.Println("The CSV file must contain a header and at least one data row.")
 		os.Exit(1)
 	}
 
+	// Extract header (field names)
 	header := records[0]
+	fieldSet := make(map[string]bool)
+	for _, field := range header {
+		fieldSet[field] = true
+	}
+
+	// If the user requested to list fields, print them and exit
+	if *listFields {
+		fmt.Println("Available fields:")
+		for _, field := range header {
+			fmt.Println(field)
+		}
+		os.Exit(0)
+	}
+
+	// Validate `-select-fields` argument
+	var fieldsToPrint []string
+	if *selectFields == "" {
+		fieldsToPrint = header
+	} else {
+		fieldsToPrint = strings.Split(*selectFields, ",")
+		for _, field := range fieldsToPrint {
+			if !fieldSet[field] {
+				fmt.Printf("Error: Field '%s' does not exist in the CSV file.\n", field)
+				os.Exit(2)
+			}
+		}
+	}
+
+	// Parse the filters
+	andFilters, orFilters := parseFilters(*filter, fieldSet)
+
+	// Create a slice of structs to store records
 	var data []Record
 	for _, row := range records[1:] {
 		record := Record{Data: make(map[string]string)}
@@ -63,14 +95,6 @@ func main() {
 
 	// Process filtering
 	filteredRecords := filterRecords(data, andFilters, orFilters)
-
-	// Determine fields to print
-	var fieldsToPrint []string
-	if *selectFields == "" {
-		fieldsToPrint = header
-	} else {
-		fieldsToPrint = strings.Split(*selectFields, ",")
-	}
 
 	// Print selected fields
 	printedLines := make(map[string]bool)
@@ -86,8 +110,8 @@ func main() {
 	}
 }
 
-// Parses filters into AND and OR conditions
-func parseFilters(filter string) (map[string]string, map[string][]string) {
+// Parses filters into AND and OR conditions, with field validation
+func parseFilters(filter string, fieldSet map[string]bool) (map[string]string, map[string][]string) {
 	andFilters := make(map[string]string)
 	orFilters := make(map[string][]string)
 
@@ -104,6 +128,10 @@ func parseFilters(filter string) (map[string]string, map[string][]string) {
 			kv := strings.SplitN(part, ",", 2)
 			if len(kv) == 2 {
 				field, value := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+				if !fieldSet[field] {
+					fmt.Printf("Error: Field '%s' does not exist in the CSV file.\n", field)
+					os.Exit(2)
+				}
 				orFilters[field] = append(orFilters[field], value)
 			}
 		}
@@ -117,6 +145,10 @@ func parseFilters(filter string) (map[string]string, map[string][]string) {
 		kv := strings.SplitN(part, ",", 2)
 		if len(kv) == 2 {
 			field, value := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+			if !fieldSet[field] {
+				fmt.Printf("Error: Field '%s' does not exist in the CSV file.\n", field)
+				os.Exit(2)
+			}
 			andFilters[field] = value
 		}
 	}
